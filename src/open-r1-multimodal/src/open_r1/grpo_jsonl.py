@@ -49,6 +49,26 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 )
 
+def validate_image_file(image_path):
+    """Validate image file before processing"""
+    print(f"DEBUG: Validating image file: {image_path}")
+    
+    if not os.path.exists(image_path):
+        print(f"ERROR: Image file does not exist: {image_path}")
+        return False
+    
+    try:
+        with PIL.Image.open(image_path) as img:
+            width, height = img.size
+            if width <= 0 or height <= 0:
+                print(f"ERROR: Invalid image dimensions: {image_path} - {width}x{height}")
+                return False
+            print(f"DEBUG: Valid image: {image_path} - {width}x{height} - mode: {img.mode}")
+            return True
+    except Exception as e:
+        print(f"ERROR: Cannot load image {image_path}: {e}")
+        return False
+
 from open_r1.qwen2_5vl_monkey_patch import monkey_patch_qwen2_5vl_flash_attn, monkey_patch_qwen2_5vl_forward, monkey_patch_torch_load
 monkey_patch_qwen2_5vl_flash_attn()    
 monkey_patch_torch_load()
@@ -921,6 +941,8 @@ def get_vlm_module(model_name_or_path):
         return Qwen2VLModule
     elif "internvl" in model_name_or_path.lower():
         return InvernVLModule
+    elif "smolvlm" in model_name_or_path.lower():
+        return SmolVLMModule
     else:
         raise ValueError(f"Unsupported model: {model_name_or_path}")
 
@@ -992,7 +1014,27 @@ def main(script_args, training_args, model_args):
 
     def make_conversation_from_jsonl(example):
         if 'image_path' in example and example['image_path'] is not None:
-            assert all(os.path.exists(p) for p in example['image_path']), f"Image paths do not exist: {example['image_path']}"
+            print(f"DEBUG: Processing example with {len(example['image_path'])} images")
+            
+            # Validate all images before processing
+            valid_paths = []
+            for i, img_path in enumerate(example['image_path']):
+                print(f"DEBUG: Checking image {i+1}/{len(example['image_path'])}: {img_path}")
+                if validate_image_file(img_path):
+                    valid_paths.append(img_path)
+                else:
+                    print(f"ERROR: Skipping invalid image: {img_path}")
+            
+            if not valid_paths:
+                print(f"ERROR: No valid images found for example, returning None")
+                return None
+                
+            if len(valid_paths) != len(example['image_path']):
+                print(f"WARNING: Only {len(valid_paths)}/{len(example['image_path'])} images are valid")
+            
+            # Update example with only valid paths
+            example['image_path'] = valid_paths
+            
             # Don't load image here, just store the path
             return {
                 'image_path': [p for p in example['image_path']],  # Store path instead of loaded image
@@ -1021,7 +1063,13 @@ def main(script_args, training_args, model_args):
             }
 
     # Map the conversations
+    print(f"DEBUG: Dataset size before mapping: {len(dataset)}")
     dataset = dataset.map(make_conversation_from_jsonl, num_proc=8)
+    
+    # Filter out None entries (invalid images)
+    original_size = len(dataset)
+    dataset = dataset.filter(lambda x: x is not None)
+    print(f"DEBUG: Dataset size after filtering: {len(dataset)} (removed {original_size - len(dataset)} invalid entries)")
 
     # Split dataset for validation if requested
     splits = {'train': dataset}
@@ -1052,6 +1100,9 @@ def main(script_args, training_args, model_args):
         max_anyres_num=script_args.max_anyres_num,
     )
 
+    # print max pixels and min pixels
+    print(f"Max pixels: {script_args.max_pixels}, Min pixels: {script_args.min_pixels}, Max anyres num: {script_args.max_anyres_num}")
+    
     # Train and push the model to the Hub
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
@@ -1067,7 +1118,8 @@ def main(script_args, training_args, model_args):
 if __name__ == "__main__":
     parser = TrlParser((GRPOScriptArguments, GRPOConfig, GRPOModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
-    if training_args.deepspeed and "zero3" in training_args.deepspeed:
-        print("zero3 is used, qwen2_5vl forward monkey patch is applied")
-        monkey_patch_qwen2_5vl_forward()
+    # Don't apply zero3 forward monkey patch for zero2
+    # if training_args.deepspeed and "zero3" in training_args.deepspeed:
+    #     print("zero3 is used, qwen2_5vl forward monkey patch is applied")
+    #     monkey_patch_qwen2_5vl_forward()
     main(script_args, training_args, model_args)
