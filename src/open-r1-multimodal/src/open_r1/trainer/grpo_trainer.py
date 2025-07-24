@@ -579,8 +579,22 @@ class VLMGRPOTrainer(Trainer):
 
         # Generate completions
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+            # Debug: Check what we're passing to generate
+            generate_params = {k: v for k, v in prompt_inputs.items() if k not in self.vlm_module.get_non_generate_params()}
+            print(f"GRPO Debug: Passing to generate: {list(generate_params.keys())}")
+            if 'input_ids' in generate_params:
+                print(f"GRPO Debug: input_ids shape: {generate_params['input_ids'].shape}")
+                # Check for image tokens
+                image_token_id = 49153  # SmolVLM image token
+                num_image_tokens = (generate_params['input_ids'] == image_token_id).sum().item()
+                print(f"GRPO Debug: Found {num_image_tokens} image tokens in generate input_ids")
+                # Show first few tokens
+                print(f"GRPO Debug: First 10 tokens: {generate_params['input_ids'][0][:10].tolist()}")
+            if 'pixel_values' in generate_params:
+                print(f"GRPO Debug: pixel_values shape: {generate_params['pixel_values'].shape}")
+            
             generate_returned_result = unwrapped_model.generate(
-                **{k: v for k, v in prompt_inputs.items() if k not in self.vlm_module.get_non_generate_params()}, 
+                **generate_params, 
                 generation_config=self.generation_config
             )
             prompt_length = prompt_ids.size(1)
