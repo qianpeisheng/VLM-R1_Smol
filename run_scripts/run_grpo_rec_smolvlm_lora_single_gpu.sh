@@ -4,7 +4,7 @@
 export CUDA_VISIBLE_DEVICES=1
 
 RUN_NAME="smolvlm-instruct-rec-grpo-lora-test"
-REPO_HOME="/home/peisheng/VLM-R1"
+REPO_HOME="/nas/xulei/VLM-R1_Smol"
 
 # Using RefCOCO data as you mentioned
 data_paths="${REPO_HOME}/rec_jsons_processed/refcoco_train.jsonl"
@@ -22,7 +22,7 @@ export LOG_PATH="${REPO_HOME}/runs/${RUN_NAME}/log/debug_log.$(date +%Y-%m-%d-%H
 # Single GPU training - no torchrun needed
 python src/open_r1/grpo_jsonl.py \
     --use_vllm False \
-    --output_dir output/$RUN_NAME \
+    --output_dir ${REPO_HOME}/output/$RUN_NAME \
     --model_name_or_path $model_path \
     --data_file_paths $data_paths \
     --image_folders $image_folders \

@@ -51,7 +51,6 @@ client = OpenAI(
 
 def validate_image_file(image_path):
     """Validate image file before processing"""
-    print(f"DEBUG: Validating image file: {image_path}")
     
     if not os.path.exists(image_path):
         print(f"ERROR: Image file does not exist: {image_path}")
@@ -63,7 +62,6 @@ def validate_image_file(image_path):
             if width <= 0 or height <= 0:
                 print(f"ERROR: Invalid image dimensions: {image_path} - {width}x{height}")
                 return False
-            print(f"DEBUG: Valid image: {image_path} - {width}x{height} - mode: {img.mode}")
             return True
     except Exception as e:
         print(f"ERROR: Cannot load image {image_path}: {e}")
@@ -1014,12 +1012,10 @@ def main(script_args, training_args, model_args):
 
     def make_conversation_from_jsonl(example):
         if 'image_path' in example and example['image_path'] is not None:
-            print(f"DEBUG: Processing example with {len(example['image_path'])} images")
             
             # Validate all images before processing
             valid_paths = []
             for i, img_path in enumerate(example['image_path']):
-                print(f"DEBUG: Checking image {i+1}/{len(example['image_path'])}: {img_path}")
                 if validate_image_file(img_path):
                     valid_paths.append(img_path)
                 else:
