@@ -70,6 +70,15 @@ class SmolVLMModule(VLMBaseModule):
         """SmolVLM processing keywords"""
         return []
     
+    def get_custom_generation_kwargs(self):
+        """SmolVLM custom generation parameters to prevent repetition"""
+        return {
+            "repetition_penalty": 1.2,
+            "no_repeat_ngram_size": 3,
+            "eos_token_id": None,  # Will be set by trainer
+            "pad_token_id": None,  # Will be set by trainer
+        }
+    
     def prepare_prompt(self, processing_class, inputs: dict[str, Union[torch.Tensor, Any]]):
         """Prepare prompts with SmolVLM's chat template"""
         prompts_text = []
@@ -238,9 +247,18 @@ class SmolVLMModule(VLMBaseModule):
     
     @staticmethod
     def format_reward_rec(completions, **kwargs):
-        """Check if output matches REC/OVD format"""
-        # Pattern for bounding box: [x1, y1, x2, y2]
-        pattern = r"\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]"
+        """Check if output matches REC/OVD format - updated for better pattern matching"""
+        # Multiple patterns to handle different output formats
+        patterns = [
+            # With answer tags
+            r'<answer>.*?\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\].*?</answer>',
+            # Simple bracket format
+            r'\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]',
+            # JSON format with bbox key
+            r'"bbox":\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]',
+            # JSON format with coordinates key
+            r'"coordinates":\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]'
+        ]
         
         completion_contents = []
         for completion in completions:
@@ -250,58 +268,99 @@ class SmolVLMModule(VLMBaseModule):
                 content = str(completion)
             completion_contents.append(content)
         
-        matches = [re.search(pattern, content) is not None for content in completion_contents]
+        # Check all patterns for each completion
+        matches = []
+        for content in completion_contents:
+            match_found = any(re.search(pattern, content, re.DOTALL) for pattern in patterns)
+            matches.append(match_found)
         
         # Debug logging
-        if os.getenv("DEBUG_MODE") == "true":
+        debug_mode = os.getenv("DEBUG_MODE") == "true"
+        if debug_mode:
             current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
-            log_path = os.getenv("LOG_PATH", "debug_smolvlm.txt")
+            log_path = os.getenv("LOG_PATH", "debug_smolvlm_format.txt")
             with open(log_path, "a", encoding='utf-8') as f:
                 f.write(f"------------- {current_time} Format reward -------------\n")
-                for content, match in zip(completion_contents, matches):
-                    f.write(f"Content: {content}\n")
-                    f.write(f"Has format: {bool(match)}\n")
+                for i, (content, match) in enumerate(zip(completion_contents, matches)):
+                    f.write(f"Completion {i}:\n")
+                    f.write(f"Content: {content[:200]}...\n")
+                    f.write(f"Has valid format: {bool(match)}\n")
+                    # Show which pattern matched (if any)
+                    for j, pattern in enumerate(patterns):
+                        if re.search(pattern, content, re.DOTALL):
+                            f.write(f"Matched pattern {j}: {pattern}\n")
+                            break
+                    f.write("\n")
         
-        return [1.0 if match else 0.0 for match in matches]
+        rewards = [1.0 if match else 0.0 for match in matches]
+        
+        if debug_mode:
+            print(f"SmolVLM Format Debug: Valid formats: {sum(rewards)}/{len(rewards)}")
+        
+        return rewards
     
     @staticmethod
     def iou_reward(completions, solution, **kwargs):
-        """Calculate IoU reward - reusing VLM-R1's implementation"""
+        """Calculate IoU reward - fixed for SmolVLM data formats"""
         import re
-        import numpy as np
+        import json
         
         def parse_bbox(text):
-            """Extract bounding box from text"""
-            pattern = r"\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]"
-            match = re.search(pattern, text)
-            if match:
-                return [int(x) for x in match.groups()]
+            """Extract bounding box from text using multiple patterns"""
+            # Try multiple patterns to handle different output formats
+            patterns = [
+                # With answer tags
+                r'<answer>.*?\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\].*?</answer>',
+                # Simple bracket format
+                r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]',
+                # JSON format with bbox key
+                r'"bbox":\s*\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]',
+                # JSON format with coordinates key
+                r'"coordinates":\s*\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.DOTALL)
+                if match:
+                    return [int(x) for x in match.groups()]
+            return None
+        
+        def parse_solution(sol):
+            """Parse ground truth bbox from solution - handle multiple formats"""
+            if isinstance(sol, str):
+                # Try to extract bbox from answer tags first
+                answer_match = re.search(r'<answer>(.*?)</answer>', sol, re.DOTALL)
+                if answer_match:
+                    answer_content = answer_match.group(1).strip()
+                    # Try to parse as JSON
+                    try:
+                        parsed = json.loads(answer_content)
+                        if isinstance(parsed, list) and len(parsed) == 4:
+                            return [float(x) for x in parsed]
+                        elif isinstance(parsed, dict):
+                            bbox = parsed.get('bbox', parsed.get('coordinates', None))
+                            if isinstance(bbox, list) and len(bbox) == 4:
+                                return [float(x) for x in bbox]
+                    except:
+                        pass
+                    # Try direct bbox extraction
+                    bbox = parse_bbox(answer_content)
+                    if bbox:
+                        return [float(x) for x in bbox]
+                # Try direct bbox extraction from full string
+                bbox = parse_bbox(sol)
+                if bbox:
+                    return [float(x) for x in bbox]
+            elif isinstance(sol, list) and len(sol) == 4:
+                return [float(x) for x in sol]
+            elif isinstance(sol, dict):
+                bbox = sol.get('bbox', sol.get('solution', sol.get('coordinates', None)))
+                if isinstance(bbox, list) and len(bbox) == 4:
+                    return [float(x) for x in bbox]
             return None
         
         def calculate_iou(box1, box2):
-            """Calculate IoU between two boxes"""
-            # Ensure boxes are numeric - convert strings to floats if needed
-            def ensure_numeric(box):
-                if box is None:
-                    return None
-                # Handle different input formats
-                if isinstance(box, (list, tuple)):
-                    try:
-                        return [float(x) for x in box]
-                    except (ValueError, TypeError):
-                        return None
-                elif isinstance(box, str):
-                    # Try to parse as bbox string
-                    parsed = parse_bbox(box)
-                    if parsed:
-                        return [float(x) for x in parsed]
-                    return None
-                else:
-                    return None
-            
-            box1 = ensure_numeric(box1)
-            box2 = ensure_numeric(box2)
-            
+            """Calculate IoU between two boxes - same as VLM-R1 implementation"""
             if box1 is None or box2 is None:
                 return 0.0
             
@@ -309,62 +368,98 @@ class SmolVLMModule(VLMBaseModule):
             if len(box1) != 4 or len(box2) != 4:
                 return 0.0
             
+            # Convert to float to handle any integer inputs
+            try:
+                box1 = [float(x) for x in box1]
+                box2 = [float(x) for x in box2]
+            except (ValueError, TypeError):
+                return 0.0
+            
+            # Calculate intersection
             x1 = max(box1[0], box2[0])
             y1 = max(box1[1], box2[1])
             x2 = min(box1[2], box2[2])
             y2 = min(box1[3], box2[3])
             
+            # Calculate intersection area
             intersection = max(0, x2 - x1) * max(0, y2 - y1)
+            
+            # Calculate areas
             area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
             area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            
+            # Calculate union
             union = area1 + area2 - intersection
             
-            return intersection / union if union > 0 else 0
+            # Return IoU
+            return intersection / union if union > 0 else 0.0
         
         rewards = []
         
-        # Debug: print the inputs to understand the data format
-        print(f"SmolVLM IoU Debug: Processing {len(completions)} completions")
-        print(f"SmolVLM IoU Debug: Solution type: {type(solution)}")
-        if isinstance(solution, list) and len(solution) > 0:
-            print(f"SmolVLM IoU Debug: First solution type: {type(solution[0])}, value: {solution[0]}")
+        # Debug logging
+        debug_mode = os.getenv("DEBUG_MODE") == "true"
+        if debug_mode:
+            print(f"SmolVLM IoU Debug: Processing {len(completions)} completions")
+            print(f"SmolVLM IoU Debug: Solution type: {type(solution)}")
+            if isinstance(solution, list) and len(solution) > 0:
+                print(f"SmolVLM IoU Debug: First solution: {solution[0]}")
         
         # Handle both list and single solution formats
         if not isinstance(solution, list):
             solution = [solution] * len(completions)
         
         for i, completion in enumerate(completions):
+            # Extract content from completion
             if isinstance(completion, list) and len(completion) > 0:
                 content = completion[0].get("content", "")
             else:
                 content = str(completion)
             
+            # Parse predicted bbox
             pred_bbox = parse_bbox(content)
             
-            # Debug: print what we found
-            print(f"SmolVLM IoU Debug: Completion {i}: content='{content[:100]}...'")
-            print(f"SmolVLM IoU Debug: Parsed bbox: {pred_bbox}")
-            
-            # Handle solution format
-            if i < len(solution) and solution[i] is not None:
-                sol = solution[i]
-                if isinstance(sol, dict):
-                    gt_bbox = sol.get("bbox", sol.get("gt_bbox", None))
-                else:
-                    gt_bbox = sol
+            # Parse ground truth
+            if i < len(solution):
+                gt_bbox = parse_solution(solution[i])
             else:
-                gt_bbox = None
+                gt_bbox = parse_solution(solution[0]) if solution else None
             
-            print(f"SmolVLM IoU Debug: GT bbox type: {type(gt_bbox)}, value: {gt_bbox}")
-            
+            # Calculate reward
             if pred_bbox and gt_bbox:
-                iou = calculate_iou(pred_bbox, gt_bbox)
-                # Soft IoU reward as in VLM-R1
-                reward = 2 * iou - 1
+                try:
+                    # Calculate IoU
+                    iou = calculate_iou(pred_bbox, gt_bbox)
+                    
+                    # Soft IoU reward (same as VLM-R1: 2 * iou - 1)
+                    reward = 2 * iou - 1
+                    
+                    # Clamp reward to reasonable range
+                    reward = max(-1.0, min(1.0, reward))
+                except Exception as e:
+                    if debug_mode:
+                        print(f"SmolVLM IoU Error: {e}")
+                    reward = -1.0
             else:
                 reward = -1.0
             
             rewards.append(reward)
+            
+            # Debug logging for first few examples
+            if debug_mode and i < 3:
+                current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+                log_path = os.getenv("LOG_PATH", "debug_smolvlm_iou.txt")
+                with open(log_path, "a", encoding='utf-8') as f:
+                    f.write(f"------------- {current_time} IoU reward {i} -------------\n")
+                    f.write(f"Content: {content[:200]}...\n")
+                    f.write(f"Predicted bbox: {pred_bbox}\n")
+                    f.write(f"Ground truth bbox: {gt_bbox}\n")
+                    f.write(f"Solution raw: {solution[i] if i < len(solution) else 'None'}\n")
+                    f.write(f"IoU: {calculate_iou(pred_bbox, gt_bbox) if pred_bbox and gt_bbox else 'N/A'}\n")
+                    f.write(f"Reward: {reward}\n\n")
+        
+        if debug_mode:
+            print(f"SmolVLM IoU Debug: Rewards range: {min(rewards)} to {max(rewards)}")
+            print(f"SmolVLM IoU Debug: Non-negative rewards: {sum(1 for r in rewards if r > -1)}/{len(rewards)}")
         
         return rewards
     
