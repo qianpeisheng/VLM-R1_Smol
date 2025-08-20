@@ -62,3 +62,7 @@ temp/
 # Downloaded packages
 *.deb
 *.whl
+
+# Allow committing everything in runs/ even if matched above
+!runs/
+!runs/**

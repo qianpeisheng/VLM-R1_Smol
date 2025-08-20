@@ -1,1 +1,2 @@
+# Store all files in runs/ with Git LFS
 runs/** filter=lfs diff=lfs merge=lfs -text
