@@ -5,9 +5,7 @@ coco/
 
 # Model checkpoints and training outputs
 checkpoints/
-runs/
 output/
-debug_*.txt
 
 # Model weights and cache files
 *.bin
